@@ -74,6 +74,8 @@ class DataGenerator:
         self.employee_ids = []
         self.organization_ids = []
         self.policy_ids = []
+        self.alert_ids = []
+        self.support_ticket_ids = []
 
     def close(self):
         self.driver.close()
@@ -123,7 +125,7 @@ class DataGenerator:
         """Generate organization nodes."""
         print(f"Generating {NUM_ORGANIZATIONS} organizations...")
         industries = ["Finance", "Technology", "Healthcare", "Energy", "Retail", "Manufacturing"]
-        org_types = ["corporation", "bank", "broker", "vendor"]
+        org_types = ["corporation", "bank", "broker", "vendor", "employer"]
 
         with self.driver.session(database=self.database) as session:
             for _ in range(NUM_ORGANIZATIONS):
@@ -162,6 +164,80 @@ class DataGenerator:
                     },
                 )
         print(f"Created {NUM_ORGANIZATIONS} organizations.")
+
+    def connect_organizations(self):
+        """Connect organizations to persons and accounts."""
+        print("Connecting organizations to the graph...")
+        with self.driver.session(database=self.database) as session:
+            # Connect persons to organizations as employers (WORKS_FOR)
+            for person_id in self.person_ids:
+                if random.random() > 0.3:  # 70% of persons have an employer
+                    org_id = random.choice(self.organization_ids)
+                    session.run(
+                        """
+                        MATCH (p:Person {id: $person_id})
+                        MATCH (o:Organization {id: $org_id})
+                        CREATE (p)-[:WORKS_FOR {
+                            start_date: date($start_date),
+                            role: $role
+                        }]->(o)
+                        """,
+                        {
+                            "person_id": person_id,
+                            "org_id": org_id,
+                            "start_date": fake.date_between(
+                                start_date="-10y", end_date="today"
+                            ).isoformat(),
+                            "role": random.choice(
+                                ["Employee", "Contractor", "Executive", "Manager", "Director"]
+                            ),
+                        },
+                    )
+
+            # Connect some accounts to organizations (corporate accounts)
+            corporate_accounts = random.sample(
+                self.account_ids, k=int(len(self.account_ids) * 0.15)
+            )
+            for account_id in corporate_accounts:
+                org_id = random.choice(self.organization_ids)
+                session.run(
+                    """
+                    MATCH (a:Account {id: $account_id})
+                    MATCH (o:Organization {id: $org_id})
+                    CREATE (o)-[:OWNS_ACCOUNT]->(a)
+                    """,
+                    {"account_id": account_id, "org_id": org_id},
+                )
+
+            # Connect some transactions to organizations (as counterparties)
+            org_transactions = random.sample(
+                self.transaction_ids, k=int(len(self.transaction_ids) * 0.2)
+            )
+            for txn_id in org_transactions:
+                org_id = random.choice(self.organization_ids)
+                session.run(
+                    """
+                    MATCH (t:Transaction {id: $txn_id})
+                    MATCH (o:Organization {id: $org_id})
+                    CREATE (t)-[:COUNTERPARTY]->(o)
+                    """,
+                    {"txn_id": txn_id, "org_id": org_id},
+                )
+
+            # Connect decisions to organizations (decisions about orgs)
+            org_decisions = random.sample(self.decision_ids, k=int(len(self.decision_ids) * 0.1))
+            for decision_id in org_decisions:
+                org_id = random.choice(self.organization_ids)
+                session.run(
+                    """
+                    MATCH (d:Decision {id: $decision_id})
+                    MATCH (o:Organization {id: $org_id})
+                    CREATE (d)-[:ABOUT]->(o)
+                    """,
+                    {"decision_id": decision_id, "org_id": org_id},
+                )
+
+        print("Connected organizations to the graph.")
 
     def generate_employees(self):
         """Generate employee nodes."""
@@ -585,6 +661,199 @@ class DataGenerator:
                 )
         print(f"Created {NUM_DECISIONS} decisions.")
 
+    def generate_alerts(self):
+        """Generate alert nodes linked to transactions and accounts."""
+        print(f"Generating {NUM_ALERTS} alerts...")
+        alert_types = [
+            "fraud_detection",
+            "velocity_check",
+            "geographic_anomaly",
+            "amount_threshold",
+            "pattern_match",
+            "sanctions_hit",
+            "device_change",
+            "behavioral_anomaly",
+        ]
+        severities = ["low", "medium", "high", "critical"]
+        statuses = ["open", "investigating", "resolved", "false_positive", "escalated"]
+
+        with self.driver.session(database=self.database) as session:
+            for i in range(NUM_ALERTS):
+                alert_id = str(uuid.uuid4())
+                self.alert_ids.append(alert_id)
+
+                alert_type = random.choice(alert_types)
+                severity = random.choices(severities, weights=[0.3, 0.4, 0.2, 0.1])[0]
+                status = random.choices(statuses, weights=[0.15, 0.2, 0.4, 0.15, 0.1])[0]
+
+                # Link to transaction or account
+                triggered_by_txn = (
+                    random.choice(self.transaction_ids) if random.random() > 0.3 else None
+                )
+                triggered_by_account = (
+                    random.choice(self.account_ids) if random.random() > 0.5 else None
+                )
+                assigned_to = random.choice(self.employee_ids) if random.random() > 0.4 else None
+                resolved_by_decision = (
+                    random.choice(self.decision_ids)
+                    if status in ["resolved", "false_positive"] and random.random() > 0.3
+                    else None
+                )
+
+                session.run(
+                    """
+                    CREATE (a:Alert {
+                        id: $id,
+                        alert_number: $alert_number,
+                        alert_type: $alert_type,
+                        severity: $severity,
+                        status: $status,
+                        description: $description,
+                        triggered_at: datetime($triggered_at),
+                        resolved_at: $resolved_at,
+                        risk_score: $risk_score,
+                        source_system: $source_system,
+                        created_at: datetime()
+                    })
+                    WITH a
+                    OPTIONAL MATCH (t:Transaction {id: $triggered_by_txn})
+                    OPTIONAL MATCH (acc:Account {id: $triggered_by_account})
+                    OPTIONAL MATCH (e:Employee {id: $assigned_to})
+                    OPTIONAL MATCH (d:Decision {id: $resolved_by_decision})
+                    FOREACH (_ IN CASE WHEN t IS NOT NULL THEN [1] ELSE [] END | CREATE (a)-[:TRIGGERED_BY]->(t))
+                    FOREACH (_ IN CASE WHEN acc IS NOT NULL THEN [1] ELSE [] END | CREATE (a)-[:REGARDING]->(acc))
+                    FOREACH (_ IN CASE WHEN e IS NOT NULL THEN [1] ELSE [] END | CREATE (a)-[:ASSIGNED_TO]->(e))
+                    FOREACH (_ IN CASE WHEN d IS NOT NULL THEN [1] ELSE [] END | CREATE (a)-[:RESOLVED_BY]->(d))
+                    """,
+                    {
+                        "id": alert_id,
+                        "alert_number": f"ALT{str(i + 1).zfill(6)}",
+                        "alert_type": alert_type,
+                        "severity": severity,
+                        "status": status,
+                        "description": f"{alert_type.replace('_', ' ').title()} alert: {fake.sentence(nb_words=8)}",
+                        "triggered_at": fake.date_time_between(
+                            start_date="-1y", end_date="now"
+                        ).isoformat(),
+                        "resolved_at": fake.date_time_between(
+                            start_date="-6m", end_date="now"
+                        ).isoformat()
+                        if status in ["resolved", "false_positive"]
+                        else None,
+                        "risk_score": round(random.uniform(0.3, 1.0), 3),
+                        "source_system": random.choice(
+                            ["Fraud Detection", "AML", "Compliance", "Risk Engine"]
+                        ),
+                        "triggered_by_txn": triggered_by_txn,
+                        "triggered_by_account": triggered_by_account,
+                        "assigned_to": assigned_to,
+                        "resolved_by_decision": resolved_by_decision,
+                    },
+                )
+        print(f"Created {NUM_ALERTS} alerts.")
+
+    def generate_support_tickets(self):
+        """Generate support ticket nodes linked to persons and accounts."""
+        print(f"Generating {NUM_SUPPORT_TICKETS} support tickets...")
+        ticket_types = [
+            "account_inquiry",
+            "transaction_dispute",
+            "fraud_report",
+            "password_reset",
+            "statement_request",
+            "limit_increase",
+            "complaint",
+            "general_inquiry",
+        ]
+        priorities = ["low", "medium", "high", "urgent"]
+        statuses = ["open", "in_progress", "pending_customer", "resolved", "closed"]
+        channels = ["phone", "email", "chat", "branch", "mobile_app"]
+
+        with self.driver.session(database=self.database) as session:
+            for i in range(NUM_SUPPORT_TICKETS):
+                ticket_id = str(uuid.uuid4())
+                self.support_ticket_ids.append(ticket_id)
+
+                ticket_type = random.choice(ticket_types)
+                priority = random.choices(priorities, weights=[0.3, 0.4, 0.2, 0.1])[0]
+                status = random.choices(statuses, weights=[0.1, 0.15, 0.1, 0.35, 0.3])[0]
+
+                # Link to person and optionally account
+                submitted_by = random.choice(self.person_ids)
+                regarding_account = (
+                    random.choice(self.account_ids) if random.random() > 0.4 else None
+                )
+                assigned_to = random.choice(self.employee_ids) if random.random() > 0.3 else None
+                related_decision = (
+                    random.choice(self.decision_ids)
+                    if status in ["resolved", "closed"] and random.random() > 0.5
+                    else None
+                )
+                related_transaction = (
+                    random.choice(self.transaction_ids)
+                    if ticket_type == "transaction_dispute" and random.random() > 0.3
+                    else None
+                )
+
+                session.run(
+                    """
+                    CREATE (s:SupportTicket {
+                        id: $id,
+                        ticket_number: $ticket_number,
+                        ticket_type: $ticket_type,
+                        priority: $priority,
+                        status: $status,
+                        subject: $subject,
+                        description: $description,
+                        channel: $channel,
+                        submitted_at: datetime($submitted_at),
+                        resolved_at: $resolved_at,
+                        satisfaction_score: $satisfaction_score,
+                        source_system: 'Support',
+                        created_at: datetime()
+                    })
+                    WITH s
+                    MATCH (p:Person {id: $submitted_by})
+                    CREATE (s)-[:SUBMITTED_BY]->(p)
+                    WITH s
+                    OPTIONAL MATCH (acc:Account {id: $regarding_account})
+                    OPTIONAL MATCH (e:Employee {id: $assigned_to})
+                    OPTIONAL MATCH (d:Decision {id: $related_decision})
+                    OPTIONAL MATCH (t:Transaction {id: $related_transaction})
+                    FOREACH (_ IN CASE WHEN acc IS NOT NULL THEN [1] ELSE [] END | CREATE (s)-[:REGARDING]->(acc))
+                    FOREACH (_ IN CASE WHEN e IS NOT NULL THEN [1] ELSE [] END | CREATE (s)-[:ASSIGNED_TO]->(e))
+                    FOREACH (_ IN CASE WHEN d IS NOT NULL THEN [1] ELSE [] END | CREATE (s)-[:RESOLVED_BY]->(d))
+                    FOREACH (_ IN CASE WHEN t IS NOT NULL THEN [1] ELSE [] END | CREATE (s)-[:RELATED_TO]->(t))
+                    """,
+                    {
+                        "id": ticket_id,
+                        "ticket_number": f"TKT{str(i + 1).zfill(6)}",
+                        "ticket_type": ticket_type,
+                        "priority": priority,
+                        "status": status,
+                        "subject": f"{ticket_type.replace('_', ' ').title()}: {fake.sentence(nb_words=5)}",
+                        "description": fake.paragraph(nb_sentences=3),
+                        "channel": random.choice(channels),
+                        "submitted_at": fake.date_time_between(
+                            start_date="-1y", end_date="now"
+                        ).isoformat(),
+                        "resolved_at": fake.date_time_between(
+                            start_date="-6m", end_date="now"
+                        ).isoformat()
+                        if status in ["resolved", "closed"]
+                        else None,
+                        "satisfaction_score": random.randint(1, 5)
+                        if status in ["resolved", "closed"]
+                        else None,
+                        "submitted_by": submitted_by,
+                        "regarding_account": regarding_account,
+                        "assigned_to": assigned_to,
+                        "related_decision": related_decision,
+                        "related_transaction": related_transaction,
+                    },
+                )
+        print(f"Created {NUM_SUPPORT_TICKETS} support tickets.")
+
     def create_causal_chains(self):
         """Create causal relationships between decisions."""
         print("Creating causal chains between decisions...")
@@ -674,19 +943,26 @@ class DataGenerator:
         self.generate_accounts()
         self.generate_transactions()
         self.generate_decisions()
+        self.generate_alerts()
+        self.generate_support_tickets()
         self.create_causal_chains()
+        self.connect_organizations()
 
         print("\n" + "=" * 50)
         print("DATA GENERATION COMPLETE!")
         print("=" * 50)
         print(f"\nGenerated:")
-        print(f"  - {NUM_ORGANIZATIONS} organizations")
+        print(
+            f"  - {NUM_ORGANIZATIONS} organizations (connected to persons, accounts, transactions)"
+        )
         print(f"  - {NUM_EMPLOYEES} employees")
         print(f"  - {NUM_POLICIES} policies")
         print(f"  - {NUM_PERSONS} persons")
         print(f"  - {NUM_ACCOUNTS} accounts")
         print(f"  - {NUM_TRANSACTIONS} transactions")
         print(f"  - {NUM_DECISIONS} decisions (with causal chains)")
+        print(f"  - {NUM_ALERTS} alerts")
+        print(f"  - {NUM_SUPPORT_TICKETS} support tickets")
         print("\nYou can now run GDS algorithms to generate FastRP embeddings.")
 
 

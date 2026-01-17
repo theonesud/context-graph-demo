@@ -91,12 +91,10 @@ export function SchemaDrawer({ open, onOpenChange }: SchemaDrawerProps) {
                   {/* Neo4j Branding and Blog Link */}
                   <Box
                     p={4}
-                    bg="blue.50"
-                    _dark={{ bg: "blue.900" }}
+                    bg={{ base: "blue.50", _dark: "blue.900" }}
                     borderRadius="lg"
                     borderWidth="1px"
-                    borderColor="blue.200"
-                    _darkBorderColor={{ borderColor: "blue.700" }}
+                    borderColor={{ base: "blue.200", _dark: "blue.700" }}
                   >
                     <HStack gap={3} mb={3}>
                       <Box width="36px" height="36px" flexShrink={0}>

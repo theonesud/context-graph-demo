@@ -101,21 +101,77 @@ export default function Home() {
       >
         <Container maxW="container.2xl">
           <Flex justify="space-between" align="center">
-            <Box>
-              <Heading size={{ base: "md", md: "lg" }} color="brand.600">
-                Context Graph Demo
-              </Heading>
-              <Text
-                color="gray.500"
-                fontSize="sm"
-                display={{ base: "none", md: "block" }}
+            <Flex align="center" gap={3}>
+              {/* Neo4j Logo */}
+              <a
+                href="https://neo4j.com"
+                target="_blank"
+                rel="noopener noreferrer"
               >
-                AI-powered decision tracing for financial institutions
-              </Text>
-            </Box>
+                <Box
+                  as="svg"
+                  viewBox="0 0 100 100"
+                  width={{ base: "32px", md: "40px" }}
+                  height={{ base: "32px", md: "40px" }}
+                  flexShrink={0}
+                >
+                  <circle cx="50" cy="50" r="48" fill="#018BFF" />
+                  <g fill="white">
+                    <circle cx="50" cy="30" r="8" />
+                    <circle cx="30" cy="65" r="8" />
+                    <circle cx="70" cy="65" r="8" />
+                    <line
+                      x1="50"
+                      y1="38"
+                      x2="33"
+                      y2="58"
+                      stroke="white"
+                      strokeWidth="3"
+                    />
+                    <line
+                      x1="50"
+                      y1="38"
+                      x2="67"
+                      y2="58"
+                      stroke="white"
+                      strokeWidth="3"
+                    />
+                    <line
+                      x1="38"
+                      y1="65"
+                      x2="62"
+                      y2="65"
+                      stroke="white"
+                      strokeWidth="3"
+                    />
+                  </g>
+                </Box>
+              </a>
+              <Box>
+                <Heading size={{ base: "md", md: "lg" }} color="brand.600">
+                  Context Graph Demo
+                </Heading>
+                <Text
+                  color="gray.500"
+                  fontSize="sm"
+                  display={{ base: "none", md: "block" }}
+                >
+                  AI-powered decision tracing with Neo4j
+                </Text>
+              </Box>
+            </Flex>
 
             {/* Desktop Navigation */}
             <Flex gap={2} align="center" display={{ base: "none", md: "flex" }}>
+              <Button asChild variant="ghost" size="sm">
+                <a
+                  href="https://neo4j.com/blog/genai/hands-on-with-context-graphs-and-neo4j/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Blog Post
+                </a>
+              </Button>
               <Button asChild variant="ghost" size="sm">
                 <a
                   href="https://github.com/johnymontana/context-graph-demo/issues"
@@ -154,6 +210,15 @@ export default function Home() {
                 <Portal>
                   <Menu.Positioner>
                     <Menu.Content>
+                      <Menu.Item value="blog" asChild>
+                        <a
+                          href="https://neo4j.com/blog/genai/hands-on-with-context-graphs-and-neo4j/"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Blog Post
+                        </a>
+                      </Menu.Item>
                       <Menu.Item value="issues" asChild>
                         <a
                           href="https://github.com/johnymontana/context-graph-demo/issues"

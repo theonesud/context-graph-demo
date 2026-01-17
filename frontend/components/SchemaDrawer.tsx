@@ -13,7 +13,6 @@ import {
   Badge,
   Separator,
   HStack,
-  Icon,
 } from "@chakra-ui/react";
 import dynamic from "next/dynamic";
 import { getGraphSchema, schemaToGraphData, type GraphData } from "@/lib/api";
@@ -82,12 +81,95 @@ export function SchemaDrawer({ open, onOpenChange }: SchemaDrawerProps) {
                     and analyzes the reasoning behind every decision made by AI
                     agents and human operators.
                   </Text>
-                  <Text color="gray.600">
+                  <Text color="gray.600" mb={4}>
                     Using a knowledge graph powered by Neo4j, the system
                     maintains full context and provenance for decisions,
                     enabling transparency, auditability, and continuous
                     improvement.
                   </Text>
+
+                  {/* Neo4j Branding and Blog Link */}
+                  <Box
+                    p={4}
+                    bg="blue.50"
+                    _dark={{ bg: "blue.900" }}
+                    borderRadius="lg"
+                    borderWidth="1px"
+                    borderColor="blue.200"
+                    _darkBorderColor={{ borderColor: "blue.700" }}
+                  >
+                    <HStack gap={3} mb={3}>
+                      <Box
+                        as="svg"
+                        viewBox="0 0 100 100"
+                        width="36px"
+                        height="36px"
+                        flexShrink={0}
+                      >
+                        <circle cx="50" cy="50" r="48" fill="#018BFF" />
+                        <g fill="white">
+                          <circle cx="50" cy="30" r="8" />
+                          <circle cx="30" cy="65" r="8" />
+                          <circle cx="70" cy="65" r="8" />
+                          <line
+                            x1="50"
+                            y1="38"
+                            x2="33"
+                            y2="58"
+                            stroke="white"
+                            strokeWidth="3"
+                          />
+                          <line
+                            x1="50"
+                            y1="38"
+                            x2="67"
+                            y2="58"
+                            stroke="white"
+                            strokeWidth="3"
+                          />
+                          <line
+                            x1="38"
+                            y1="65"
+                            x2="62"
+                            y2="65"
+                            stroke="white"
+                            strokeWidth="3"
+                          />
+                        </g>
+                      </Box>
+                      <Box>
+                        <Text
+                          fontWeight="semibold"
+                          color="blue.700"
+                          _dark={{ color: "blue.200" }}
+                        >
+                          Powered by Neo4j
+                        </Text>
+                        <Text
+                          fontSize="sm"
+                          color="gray.600"
+                          _dark={{ color: "gray.400" }}
+                        >
+                          The graph intelligence platform
+                        </Text>
+                      </Box>
+                    </HStack>
+                    <Button
+                      asChild
+                      size="sm"
+                      colorPalette="blue"
+                      variant="outline"
+                      width="full"
+                    >
+                      <a
+                        href="https://neo4j.com/blog/genai/hands-on-with-context-graphs-and-neo4j/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Read the Context Graph Blog Post
+                      </a>
+                    </Button>
+                  </Box>
                 </Box>
 
                 <Separator />
@@ -311,7 +393,12 @@ function EntityType({
 }) {
   return (
     <HStack gap={3}>
-      <Badge colorPalette={color} size="sm" minW="100px" justifyContent="center">
+      <Badge
+        colorPalette={color}
+        size="sm"
+        minW="100px"
+        justifyContent="center"
+      >
         {name}
       </Badge>
       <Text fontSize="sm" color="gray.600">

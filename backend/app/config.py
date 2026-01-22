@@ -30,6 +30,23 @@ class Neo4jConfig:
 
 
 @dataclass
+class OllamaConfig:
+    """Ollama configuration for local embeddings."""
+
+    base_url: str = "http://localhost:11434"
+    model: str = "nomic-embed-text"
+    dimensions: int = 768
+
+    @classmethod
+    def from_env(cls) -> "OllamaConfig":
+        return cls(
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            model=os.getenv("OLLAMA_MODEL", "nomic-embed-text"),
+            dimensions=int(os.getenv("OLLAMA_DIMENSIONS", "768")),
+        )
+
+
+@dataclass
 class OpenAIConfig:
     """OpenAI configuration for text embeddings."""
 
@@ -43,6 +60,19 @@ class OpenAIConfig:
             api_key=os.getenv("OPENAI_API_KEY", ""),
             embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
             embedding_dimensions=int(os.getenv("OPENAI_EMBEDDING_DIMENSIONS", "1536")),
+        )
+
+
+@dataclass
+class GeminiConfig:
+    """Gemini configuration for Google GenAI."""
+
+    api_key: str
+
+    @classmethod
+    def from_env(cls) -> "GeminiConfig":
+        return cls(
+            api_key=os.getenv("GEMINI_API_KEY", ""),
         )
 
 
@@ -66,6 +96,8 @@ class AppConfig:
     neo4j: Neo4jConfig
     openai: OpenAIConfig
     anthropic: AnthropicConfig
+    gemini: GeminiConfig
+    ollama: OllamaConfig
 
     # FastRP embedding dimensions (structural)
     fastrp_dimensions: int = 128
@@ -81,6 +113,8 @@ class AppConfig:
             neo4j=Neo4jConfig.from_env(),
             openai=OpenAIConfig.from_env(),
             anthropic=AnthropicConfig.from_env(),
+            gemini=GeminiConfig.from_env(),
+            ollama=OllamaConfig.from_env(),
             fastrp_dimensions=int(os.getenv("FASTRP_DIMENSIONS", "128")),
             host=os.getenv("HOST", "0.0.0.0"),
             port=int(os.getenv("PORT", "8000")),

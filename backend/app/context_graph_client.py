@@ -130,19 +130,19 @@ class ContextGraphClient:
             (
                 "vector",
                 "decision_reasoning_idx",
-                """
+                f"""
                 CREATE VECTOR INDEX decision_reasoning_idx IF NOT EXISTS
                 FOR (d:Decision) ON (d.reasoning_embedding)
-                OPTIONS {indexConfig: {`vector.dimensions`: 1536, `vector.similarity_function`: 'cosine'}}
+                OPTIONS {{indexConfig: {{`vector.dimensions`: {config.ollama.dimensions}, `vector.similarity_function`: 'cosine'}}}}
             """,
             ),
             (
                 "vector",
                 "policy_description_idx",
-                """
+                f"""
                 CREATE VECTOR INDEX policy_description_idx IF NOT EXISTS
                 FOR (p:Policy) ON (p.description_embedding)
-                OPTIONS {indexConfig: {`vector.dimensions`: 1536, `vector.similarity_function`: 'cosine'}}
+                OPTIONS {{indexConfig: {{`vector.dimensions`: {config.ollama.dimensions}, `vector.similarity_function`: 'cosine'}}}}
             """,
             ),
             # Vector indexes for FastRP structural embeddings (128 dims)

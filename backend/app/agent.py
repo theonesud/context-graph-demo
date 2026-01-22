@@ -1,17 +1,20 @@
 """
-Claude Agent SDK integration with Context Graph tools.
-Provides MCP tools for querying and updating the context graph.
+Gemini Agent integration with Context Graph tools.
+Provides tools for querying and updating the context graph.
 """
 
 import json
-from typing import Any
-
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server, tool
+import logging
+from typing import Any, List, Optional, Dict
+from google import genai
+from google.genai import types
 
 from .context_graph_client import context_graph_client
 from .gds_client import gds_client
 from .vector_client import vector_client
+from .config import config
 
+logger = logging.getLogger(__name__)
 
 def slim_properties(props: dict) -> dict:
     """Remove large properties to reduce response size."""
@@ -29,7 +32,6 @@ def slim_properties(props: dict) -> dict:
         else:
             slim[key] = value
     return slim
-
 
 def get_graph_data_for_entity(entity_id: str, depth: int = 2, limit: int = 30) -> dict:
     """Get graph visualization data centered on an entity."""
@@ -68,9 +70,362 @@ def get_graph_data_for_entity(entity_id: str, depth: int = 2, limit: int = 30) -
             "relationships": relationships,
         }
     except Exception as e:
-        print(f"Error getting graph data for entity {entity_id}: {e}")
+        logger.error(f"Error getting graph data for entity {entity_id}: {e}")
         return {"nodes": [], "relationships": []}
 
+def merge_graph_data(graphs: list[dict], max_nodes: int = 50, max_rels: int = 75) -> dict:
+    """Merge multiple graph data objects, removing duplicates and limiting size."""
+    all_nodes = {}
+    all_relationships = {}
+
+    for graph in graphs:
+        if not graph:
+            continue
+        for node in graph.get("nodes", []):
+            if len(all_nodes) < max_nodes:
+                all_nodes[node["id"]] = node
+        for rel in graph.get("relationships", []):
+            # Only include relationships where both nodes are in the graph
+            if rel.get("startNodeId") in all_nodes and rel.get("endNodeId") in all_nodes:
+                if len(all_relationships) < max_rels:
+                    all_relationships[rel["id"]] = rel
+
+    return {
+        "nodes": list(all_nodes.values()),
+        "relationships": list(all_relationships.values()),
+    }
+
+# ============================================
+# TOOLS
+# ============================================
+
+def search_customer(query: str, limit: int = 10) -> dict:
+    """
+    Search for customers by name, email, or account number.
+    Returns customer profiles with risk scores and related account counts.
+
+    Args:
+        query: Search string (name, email, or account number)
+        limit: Maximum number of results to return
+    """
+    try:
+        results = context_graph_client.search_customers(query=query, limit=limit)
+        # Include graph data for top customers (1 hop from each)
+        graphs = []
+        for customer in results[:3]:
+            customer_id = customer.get("id")
+            if customer_id:
+                customer_graph = get_graph_data_for_entity(customer_id, depth=1)
+                graphs.append(customer_graph)
+
+        graph_data = merge_graph_data(graphs) if graphs else {"nodes": [], "relationships": []}
+
+        return {
+            "customers": results,
+            "graph_data": graph_data,
+        }
+    except Exception as e:
+        logger.error(f"Error searching customers: {e}")
+        return {"error": str(e)}
+
+def get_customer_decisions(customer_id: str, decision_type: Optional[str] = None, limit: int = 20) -> dict:
+    """
+    Get all decisions made about a specific customer, including approvals, rejections, escalations, and exceptions.
+
+    Args:
+        customer_id: The ID of the customer
+        decision_type: Optional filter by decision type (e.g., 'Approval', 'Rejection')
+        limit: Maximum number of decisions to return
+    """
+    try:
+        results = context_graph_client.get_customer_decisions(
+            customer_id=customer_id,
+            decision_type=decision_type,
+            limit=limit,
+        )
+        graph_data = get_graph_data_for_entity(customer_id, depth=2)
+
+        return {
+            "decisions": results,
+            "graph_data": graph_data,
+        }
+    except Exception as e:
+        logger.error(f"Error getting decisions: {e}")
+        return {"error": str(e)}
+
+def find_similar_decisions(decision_id: str, limit: int = 5) -> dict:
+    """
+    Find structurally similar past decisions using FastRP graph embeddings.
+    Returns decisions with similar patterns of entities, relationships, and outcomes.
+
+    Args:
+        decision_id: The ID of the reference decision
+        limit: Maximum number of similar decisions to return
+    """
+    try:
+        results = gds_client.find_similar_decisions_knn(decision_id=decision_id, limit=limit)
+        graph_data = get_graph_data_for_entity(decision_id, depth=2)
+
+        return {
+            "similar_decisions": results,
+            "graph_data": graph_data,
+        }
+    except Exception as e:
+        logger.error(f"Error finding similar decisions: {e}")
+        return {"error": str(e)}
+
+def find_precedents(scenario: str, category: Optional[str] = None, limit: int = 5) -> dict:
+    """
+    Find precedent decisions that could inform the current decision.
+    Uses both semantic similarity (meaning) and structural similarity (graph patterns).
+
+    Args:
+        scenario: Description of the current situation to find precedents for
+        category: Optional policy category to filter by
+        limit: Maximum number of precedents to return
+    """
+    try:
+        results = vector_client.find_precedents_hybrid(scenario=scenario, category=category, limit=limit)
+        graph_data = None
+        if results and len(results) > 0:
+            first_id = results[0].get("id") if isinstance(results[0], dict) else None
+            if first_id:
+                graph_data = get_graph_data_for_entity(first_id, depth=2)
+
+        return {
+            "precedents": results,
+            "graph_data": graph_data,
+        }
+    except Exception as e:
+        logger.error(f"Error finding precedents: {e}")
+        return {"error": str(e)}
+
+def get_causal_chain(decision_id: str, direction: str = "both", depth: int = 3) -> dict:
+    """
+    Trace the causal chain of a decision - what caused it and what it led to.
+    Useful for understanding decision impact and history.
+
+    Args:
+        decision_id: The ID of the decision to trace
+        direction: Direction to trace: 'upstream', 'downstream', or 'both'
+        depth: Maximum depth of the causal chain
+    """
+    try:
+        results = context_graph_client.get_causal_chain(
+            decision_id=decision_id,
+            direction=direction,
+            depth=depth,
+        )
+        graph_data = get_graph_data_for_entity(decision_id, depth=3)
+
+        return {
+            "causal_chain": results,
+            "graph_data": graph_data,
+        }
+    except Exception as e:
+        logger.error(f"Error getting causal chain: {e}")
+        return {"error": str(e)}
+
+def record_decision(
+    decision_type: str,
+    category: str,
+    reasoning: str,
+    customer_id: str,
+    account_id: Optional[str] = None,
+    risk_factors: Optional[List[str]] = None,
+    precedent_ids: Optional[List[str]] = None,
+    confidence_score: float = 0.8,
+) -> dict:
+    """
+    Record a new decision with full reasoning context.
+    Creates a decision trace in the context graph that can be referenced by future decisions.
+
+    Args:
+        decision_type: Type of decision (e.g., 'Credit Approval', 'Fraud Investigation')
+        category: Policy category (e.g., 'Credit', 'Onboarding', 'Fraud')
+        reasoning: Detailed explanation of the decision logic
+        customer_id: ID of the customer the decision relates to
+        account_id: Optional ID of the account the decision relates to
+        risk_factors: List of risk factor strings considered
+        precedent_ids: List of IDs of past decisions that informed this one
+        confidence_score: Score from 0.0 to 1.0 representing confidence in the decision
+    """
+    try:
+        reasoning_embedding = None
+        try:
+            reasoning_embedding = vector_client.generate_embedding(reasoning)
+        except Exception:
+            pass
+
+        decision_id = context_graph_client.record_decision(
+            decision_type=decision_type,
+            category=category,
+            reasoning=reasoning,
+            customer_id=customer_id,
+            account_id=account_id,
+            risk_factors=risk_factors or [],
+            precedent_ids=precedent_ids or [],
+            confidence_score=confidence_score,
+            reasoning_embedding=reasoning_embedding,
+        )
+
+        return {
+            "success": True,
+            "decision_id": decision_id,
+            "message": f"Decision recorded successfully with ID {decision_id}",
+        }
+    except Exception as e:
+        logger.error(f"Error recording decision: {e}")
+        return {"error": str(e)}
+
+def detect_fraud_patterns(account_id: Optional[str] = None, similarity_threshold: float = 0.7) -> dict:
+    """
+    Analyze accounts or transactions for potential fraud patterns using graph structure analysis.
+    Uses Node Similarity to compare against known fraud cases.
+
+    Args:
+        account_id: Optional specific account to analyze. If omitted, analyzes all active accounts.
+        similarity_threshold: Threshold for reporting similar patterns (0.0 to 1.0)
+    """
+    try:
+        results = gds_client.detect_fraud_patterns(
+            account_id=account_id,
+            similarity_threshold=similarity_threshold,
+        )
+        return results
+    except Exception as e:
+        logger.error(f"Error detecting fraud patterns: {e}")
+        return {"error": str(e)}
+
+def find_decision_community(decision_id: str, limit: int = 10) -> dict:
+    """
+    Find decisions in the same community using Louvain community detection.
+    Returns decisions related through causal chains and precedents.
+
+    Args:
+        decision_id: The ID of the decision to find the community for
+        limit: Maximum number of related decisions to return
+    """
+    try:
+        with gds_client.driver.session(database=gds_client.database) as session:
+            result = session.run(
+                """
+                MATCH (source:Decision {id: $decision_id})
+                MATCH (other:Decision)
+                WHERE other.community_id = source.community_id AND other.id <> source.id
+                RETURN other.id AS id,
+                       other.decision_type AS decision_type,
+                       other.category AS category,
+                       other.reasoning_summary AS reasoning_summary,
+                       other.decision_timestamp AS decision_timestamp,
+                       other.community_id AS community_id
+                ORDER BY other.decision_timestamp DESC
+                LIMIT $limit
+                """,
+                {"decision_id": decision_id, "limit": limit},
+            )
+            community_decisions = [dict(record) for record in result]
+
+        graph_data = get_graph_data_for_entity(decision_id, depth=2)
+
+        return {
+            "community_decisions": community_decisions,
+            "graph_data": graph_data,
+        }
+    except Exception as e:
+        logger.error(f"Error finding community: {e}")
+        return {"error": str(e)}
+
+def get_policy(category: Optional[str] = None, policy_name: Optional[str] = None) -> dict:
+    """
+    Get current policy rules. Returns details including thresholds and requirements.
+
+    Args:
+        category: Policy category to filter by (e.g., 'Credit', 'Fraud')
+        policy_name: Search for a specific policy by name
+    """
+    try:
+        policies = context_graph_client.get_policies(category=category)
+
+        if policy_name:
+            stop_words = {"the", "a", "an", "for", "and", "or", "of", "in", "to", "with"}
+            search_words = [
+                word.lower()
+                for word in policy_name.split()
+                if word.lower() not in stop_words and len(word) > 2
+            ]
+
+            scored_policies = []
+            for policy in policies:
+                policy_name_lower = policy.get("name", "").lower()
+                matches = sum(1 for word in search_words if word in policy_name_lower)
+                if matches > 0:
+                    scored_policies.append({"policy": policy, "relevance_score": matches})
+
+            scored_policies.sort(key=lambda x: x["relevance_score"], reverse=True)
+
+            if scored_policies:
+                return {
+                    "matching_policies": [
+                        {**sp["policy"], "relevance_score": sp["relevance_score"]}
+                        for sp in scored_policies
+                    ],
+                    "total_matches": len(scored_policies),
+                }
+            else:
+                return {
+                    "matching_policies": [],
+                    "all_policies_in_category": policies,
+                    "note": f"No policies matched '{policy_name}'. Showing all in category.",
+                }
+
+        return {"policies": policies}
+    except Exception as e:
+        logger.error(f"Error getting policy: {e}")
+        return {"error": str(e)}
+
+def execute_cypher(cypher: str) -> dict:
+    """
+    Execute a read-only Cypher query against the context graph for custom analysis.
+    Only SELECT/MATCH queries are allowed.
+
+    Args:
+        cypher: The Cypher query string
+    """
+    try:
+        results = context_graph_client.execute_cypher(cypher=cypher)
+        return {"results": results}
+    except ValueError as e:
+        return {"error": f"Query not allowed: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error executing query: {e}")
+        return {"error": str(e)}
+
+def get_schema() -> dict:
+    """
+    Get the graph database schema including node labels, relationship types, and property keys.
+    """
+    try:
+        schema = context_graph_client.get_schema()
+        return schema
+    except Exception as e:
+        logger.error(f"Error getting schema: {e}")
+        return {"error": str(e)}
+
+# List of tools to pass to Gemini
+TOOLS = [
+    search_customer,
+    get_customer_decisions,
+    find_similar_decisions,
+    find_precedents,
+    get_causal_chain,
+    record_decision,
+    detect_fraud_patterns,
+    find_decision_community,
+    get_policy,
+    execute_cypher,
+    get_schema,
+]
 
 # ============================================
 # SYSTEM PROMPT
@@ -111,672 +466,174 @@ You have access to tools that leverage both:
 
 This combination provides insights that are impossible with traditional databases."""
 
-
 # ============================================
-# MCP TOOLS
+# AGENT CLASS
 # ============================================
-
-
-def merge_graph_data(graphs: list[dict], max_nodes: int = 50, max_rels: int = 75) -> dict:
-    """Merge multiple graph data objects, removing duplicates and limiting size."""
-    all_nodes = {}
-    all_relationships = {}
-
-    for graph in graphs:
-        if not graph:
-            continue
-        for node in graph.get("nodes", []):
-            if len(all_nodes) < max_nodes:
-                all_nodes[node["id"]] = node
-        for rel in graph.get("relationships", []):
-            # Only include relationships where both nodes are in the graph
-            if rel.get("startNodeId") in all_nodes and rel.get("endNodeId") in all_nodes:
-                if len(all_relationships) < max_rels:
-                    all_relationships[rel["id"]] = rel
-
-    return {
-        "nodes": list(all_nodes.values()),
-        "relationships": list(all_relationships.values()),
-    }
-
-
-@tool(
-    "search_customer",
-    "Search for customers by name, email, or account number. Returns customer profiles with risk scores and related account counts.",
-    {"query": str, "limit": int},
-)
-async def search_customer(args: dict[str, Any]) -> dict[str, Any]:
-    """Search for customers in the context graph."""
-    try:
-        results = context_graph_client.search_customers(
-            query=args["query"], limit=args.get("limit", 10)
-        )
-        # Include graph data for top customers (1 hop from each)
-        graphs = []
-        for customer in results[:3]:  # Limit to first 3 customers
-            customer_id = customer.get("id")
-            if customer_id:
-                customer_graph = get_graph_data_for_entity(customer_id, depth=1)
-                graphs.append(customer_graph)
-
-        # Merge all graph data with size limits
-        graph_data = merge_graph_data(graphs) if graphs else {"nodes": [], "relationships": []}
-
-        response = {
-            "customers": results,
-            "graph_data": graph_data,
-        }
-        return {"content": [{"type": "text", "text": json.dumps(response, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error searching customers: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "get_customer_decisions",
-    "Get all decisions made about a specific customer, including approvals, rejections, escalations, and exceptions.",
-    {"customer_id": str, "decision_type": str, "limit": int},
-)
-async def get_customer_decisions(args: dict[str, Any]) -> dict[str, Any]:
-    """Get decisions about a customer."""
-    try:
-        results = context_graph_client.get_customer_decisions(
-            customer_id=args["customer_id"],
-            decision_type=args.get("decision_type"),
-            limit=args.get("limit", 20),
-        )
-        # Include graph data centered on the customer
-        graph_data = get_graph_data_for_entity(args["customer_id"], depth=2)
-
-        response = {
-            "decisions": results,
-            "graph_data": graph_data,
-        }
-        return {"content": [{"type": "text", "text": json.dumps(response, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error getting decisions: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "find_similar_decisions",
-    "Find structurally similar past decisions using FastRP graph embeddings. Returns decisions with similar patterns of entities, relationships, and outcomes.",
-    {"decision_id": str, "limit": int},
-)
-async def find_similar_decisions(args: dict[str, Any]) -> dict[str, Any]:
-    """Find similar decisions using FastRP embeddings."""
-    try:
-        results = gds_client.find_similar_decisions_knn(
-            decision_id=args["decision_id"], limit=args.get("limit", 5)
-        )
-        # Include graph data centered on the original decision
-        graph_data = get_graph_data_for_entity(args["decision_id"], depth=2)
-
-        response = {
-            "similar_decisions": results,
-            "graph_data": graph_data,
-        }
-        return {"content": [{"type": "text", "text": json.dumps(response, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error finding similar decisions: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "find_precedents",
-    "Find precedent decisions that could inform the current decision. Uses both semantic similarity (meaning) and structural similarity (graph patterns).",
-    {"scenario": str, "category": str, "limit": int},
-)
-async def find_precedents(args: dict[str, Any]) -> dict[str, Any]:
-    """Find precedent decisions using hybrid search."""
-    try:
-        results = vector_client.find_precedents_hybrid(
-            scenario=args["scenario"], category=args.get("category"), limit=args.get("limit", 5)
-        )
-        # Include graph data for the first precedent found
-        graph_data = None
-        if results and len(results) > 0:
-            first_id = results[0].get("id") if isinstance(results[0], dict) else None
-            if first_id:
-                graph_data = get_graph_data_for_entity(first_id, depth=2)
-
-        response = {
-            "precedents": results,
-            "graph_data": graph_data,
-        }
-        return {"content": [{"type": "text", "text": json.dumps(response, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error finding precedents: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "get_causal_chain",
-    "Trace the causal chain of a decision - what caused it and what it led to. Useful for understanding decision impact and history.",
-    {"decision_id": str, "direction": str, "depth": int},
-)
-async def get_causal_chain(args: dict[str, Any]) -> dict[str, Any]:
-    """Get the causal chain for a decision."""
-    try:
-        results = context_graph_client.get_causal_chain(
-            decision_id=args["decision_id"],
-            direction=args.get("direction", "both"),
-            depth=args.get("depth", 3),
-        )
-        # Include graph data centered on the decision
-        graph_data = get_graph_data_for_entity(args["decision_id"], depth=3)
-
-        response = {
-            "causal_chain": results,
-            "graph_data": graph_data,
-        }
-        return {"content": [{"type": "text", "text": json.dumps(response, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error getting causal chain: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "record_decision",
-    "Record a new decision with full reasoning context. Creates a decision trace in the context graph that can be referenced by future decisions.",
-    {
-        "decision_type": str,
-        "category": str,
-        "reasoning": str,
-        "customer_id": str,
-        "account_id": str,
-        "risk_factors": list,
-        "precedent_ids": list,
-        "confidence_score": float,
-    },
-)
-async def record_decision(args: dict[str, Any]) -> dict[str, Any]:
-    """Record a new decision in the context graph."""
-    try:
-        # Generate embedding for the reasoning
-        reasoning_embedding = None
-        try:
-            reasoning_embedding = vector_client.generate_embedding(args["reasoning"])
-        except Exception:
-            pass  # Continue without embedding if it fails
-
-        decision_id = context_graph_client.record_decision(
-            decision_type=args["decision_type"],
-            category=args["category"],
-            reasoning=args["reasoning"],
-            customer_id=args.get("customer_id"),
-            account_id=args.get("account_id"),
-            risk_factors=args.get("risk_factors", []),
-            precedent_ids=args.get("precedent_ids", []),
-            confidence_score=args.get("confidence_score", 0.8),
-            reasoning_embedding=reasoning_embedding,
-        )
-
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "success": True,
-                            "decision_id": decision_id,
-                            "message": f"Decision recorded successfully with ID {decision_id}",
-                        },
-                        indent=2,
-                    ),
-                }
-            ]
-        }
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error recording decision: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "detect_fraud_patterns",
-    "Analyze accounts or transactions for potential fraud patterns using graph structure analysis. Uses Node Similarity to compare against known fraud cases.",
-    {"account_id": str, "similarity_threshold": float},
-)
-async def detect_fraud_patterns(args: dict[str, Any]) -> dict[str, Any]:
-    """Detect fraud patterns using graph analysis."""
-    try:
-        results = gds_client.detect_fraud_patterns(
-            account_id=args.get("account_id"),
-            similarity_threshold=args.get("similarity_threshold", 0.7),
-        )
-        return {"content": [{"type": "text", "text": json.dumps(results, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error detecting fraud patterns: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "find_decision_community",
-    "Find decisions in the same community using Louvain community detection. Returns decisions that are structurally related through causal chains and precedent relationships.",
-    {"decision_id": str, "limit": int},
-)
-async def find_decision_community(args: dict[str, Any]) -> dict[str, Any]:
-    """Find decisions in the same community using Louvain."""
-    try:
-        decision_id = args["decision_id"]
-        limit = args.get("limit", 10)
-
-        # Community IDs are computed at app startup via Louvain
-        # Query decisions in the same community
-        with gds_client.driver.session(database=gds_client.database) as session:
-            result = session.run(
-                """
-                MATCH (source:Decision {id: $decision_id})
-                MATCH (other:Decision)
-                WHERE other.community_id = source.community_id AND other.id <> source.id
-                RETURN other.id AS id,
-                       other.decision_type AS decision_type,
-                       other.category AS category,
-                       other.reasoning_summary AS reasoning_summary,
-                       other.decision_timestamp AS decision_timestamp,
-                       other.community_id AS community_id
-                ORDER BY other.decision_timestamp DESC
-                LIMIT $limit
-                """,
-                {"decision_id": decision_id, "limit": limit},
-            )
-            community_decisions = [dict(record) for record in result]
-
-        # Include graph data centered on the decision
-        graph_data = get_graph_data_for_entity(decision_id, depth=2)
-
-        response = {
-            "community_decisions": community_decisions,
-            "graph_data": graph_data,
-        }
-        return {"content": [{"type": "text", "text": json.dumps(response, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error finding community: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "get_policy",
-    "Get the current policy rules for a specific category. Returns policy details including thresholds and requirements. If policy_name is provided, returns policies matching any words in the name.",
-    {"category": str, "policy_name": str},
-)
-async def get_policy(args: dict[str, Any]) -> dict[str, Any]:
-    """Get policy information."""
-    try:
-        # Get all policies for the category
-        policies = context_graph_client.get_policies(category=args.get("category"))
-
-        if args.get("policy_name"):
-            # Extract meaningful words from the search query (skip common words)
-            stop_words = {"the", "a", "an", "for", "and", "or", "of", "in", "to", "with"}
-            search_words = [
-                word.lower()
-                for word in args["policy_name"].split()
-                if word.lower() not in stop_words and len(word) > 2
-            ]
-
-            # Score each policy by how many search words match
-            scored_policies = []
-            for policy in policies:
-                policy_name_lower = policy.get("name", "").lower()
-                # Count how many search words appear in the policy name
-                matches = sum(1 for word in search_words if word in policy_name_lower)
-                if matches > 0:
-                    scored_policies.append({"policy": policy, "relevance_score": matches})
-
-            # Sort by relevance score (highest first)
-            scored_policies.sort(key=lambda x: x["relevance_score"], reverse=True)
-
-            if scored_policies:
-                # Return all matching policies with relevance info
-                results = {
-                    "matching_policies": [
-                        {**sp["policy"], "relevance_score": sp["relevance_score"]}
-                        for sp in scored_policies
-                    ],
-                    "search_terms": search_words,
-                    "total_matches": len(scored_policies),
-                }
-            else:
-                # No matches found - return all policies in category as fallback
-                results = {
-                    "matching_policies": [],
-                    "search_terms": search_words,
-                    "total_matches": 0,
-                    "all_policies_in_category": policies,
-                    "note": f"No policies matched '{args['policy_name']}'. Showing all policies in category.",
-                }
-        else:
-            results = policies
-
-        return {"content": [{"type": "text", "text": json.dumps(results, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error getting policy: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "execute_cypher",
-    "Execute a read-only Cypher query against the context graph for custom analysis. Only SELECT/MATCH queries are allowed.",
-    {"cypher": str},
-)
-async def execute_cypher(args: dict[str, Any]) -> dict[str, Any]:
-    """Execute a read-only Cypher query."""
-    try:
-        results = context_graph_client.execute_cypher(cypher=args["cypher"])
-        return {"content": [{"type": "text", "text": json.dumps(results, indent=2, default=str)}]}
-    except ValueError as e:
-        return {
-            "content": [{"type": "text", "text": f"Query not allowed: {str(e)}"}],
-            "is_error": True,
-        }
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error executing query: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-@tool(
-    "get_schema",
-    "Get the graph database schema including node labels, relationship types, property keys, indexes, and constraints. Also returns counts for each node label and relationship type.",
-    {},
-)
-async def get_schema(args: dict[str, Any]) -> dict[str, Any]:
-    """Get the graph database schema."""
-    try:
-        schema = context_graph_client.get_schema()
-        return {"content": [{"type": "text", "text": json.dumps(schema, indent=2, default=str)}]}
-    except Exception as e:
-        return {
-            "content": [{"type": "text", "text": f"Error getting schema: {str(e)}"}],
-            "is_error": True,
-        }
-
-
-# ============================================
-# MCP SERVER CREATION
-# ============================================
-
-
-def create_context_graph_server():
-    """Create the MCP server with all context graph tools."""
-    return create_sdk_mcp_server(
-        name="context-graph",
-        version="1.0.0",
-        tools=[
-            search_customer,
-            get_customer_decisions,
-            find_similar_decisions,
-            find_precedents,
-            get_causal_chain,
-            record_decision,
-            detect_fraud_patterns,
-            find_decision_community,
-            get_policy,
-            execute_cypher,
-            get_schema,
-        ],
-    )
-
-
-def get_agent_options() -> ClaudeAgentOptions:
-    """Get the agent options with context graph server configured."""
-    context_graph_server = create_context_graph_server()
-
-    return ClaudeAgentOptions(
-        system_prompt=CONTEXT_GRAPH_SYSTEM_PROMPT,
-        mcp_servers={"graph": context_graph_server},
-        allowed_tools=[
-            "mcp__graph__search_customer",
-            "mcp__graph__get_customer_decisions",
-            "mcp__graph__find_similar_decisions",
-            "mcp__graph__find_precedents",
-            "mcp__graph__get_causal_chain",
-            "mcp__graph__record_decision",
-            "mcp__graph__detect_fraud_patterns",
-            "mcp__graph__find_decision_community",
-            "mcp__graph__get_policy",
-            "mcp__graph__execute_cypher",
-            "mcp__graph__get_schema",
-        ],
-    )
-
-
-# ============================================
-# AGENT CONTEXT
-# ============================================
-
-AVAILABLE_TOOLS = [
-    "search_customer",
-    "get_customer_decisions",
-    "find_similar_decisions",
-    "find_precedents",
-    "get_causal_chain",
-    "record_decision",
-    "detect_fraud_patterns",
-    "find_decision_community",
-    "get_policy",
-    "execute_cypher",
-    "get_schema",
-]
-
-
-def get_agent_context() -> dict[str, Any]:
-    """Get agent context information for transparency/debugging."""
-    return {
-        "system_prompt": CONTEXT_GRAPH_SYSTEM_PROMPT,
-        "model": "claude-sonnet-4-20250514",
-        "available_tools": AVAILABLE_TOOLS,
-        "mcp_server": "context-graph",
-    }
-
-
-# ============================================
-# AGENT SESSION MANAGEMENT
-# ============================================
-
 
 class ContextGraphAgent:
-    """Wrapper for managing Claude Agent SDK sessions."""
+    """Wrapper for managing Gemini Agent sessions."""
 
     def __init__(self):
-        self.options = get_agent_options()
-        self.client: ClaudeSDKClient | None = None
+        self.client = genai.Client(api_key=config.gemini.api_key)
+        self.model_name = "gemini-2.5-flash-lite"
+        self.system_instruction = CONTEXT_GRAPH_SYSTEM_PROMPT
+        self.tools = TOOLS
+        self.chat_session = None
 
     async def __aenter__(self):
-        self.client = ClaudeSDKClient(options=self.options)
-        await self.client.connect()
+        # The new SDK doesn't strictly need connect/disconnect like Claude Agent SDK
+        # but we keep the interface for compatibility
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.client:
-            await self.client.disconnect()
+        pass
+
+    def _get_genai_history(self, conversation_history: List[Dict[str, str]]):
+        history = []
+        for msg in conversation_history:
+            role = "user" if msg["role"] == "user" else "model"
+            history.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
+        return history
 
     async def query(
         self, message: str, conversation_history: list[dict[str, str]] | None = None
     ) -> dict[str, Any]:
         """Send a query to the agent and get the response."""
-        if not self.client:
-            raise RuntimeError("Agent not connected. Use 'async with' context manager.")
+        history = self._get_genai_history(conversation_history or [])
 
-        # Build message with conversation context
-        if conversation_history and len(conversation_history) > 0:
-            # Format history as context in the message
-            history_text = "\n".join(
-                [
-                    f"{msg['role'].upper()}: {msg['content']}" for msg in conversation_history[-6:]
-                ]  # Last 6 messages
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=history + [types.Content(role="user", parts=[types.Part(text=message)])],
+            config=types.GenerateContentConfig(
+                system_instruction=self.system_instruction,
+                tools=self.tools,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=False)
             )
-            full_message = f"""Previous conversation:
-{history_text}
-
-Current message from USER: {message}
-
-Please respond to the current message, taking the conversation history into account."""
-        else:
-            full_message = message
-
-        # Send the message
-        await self.client.query(full_message)
+        )
 
         response_text = ""
         tool_calls = []
-        decisions_made = []
 
-        async for msg in self.client.receive_response():
-            # Process different message types
-            if hasattr(msg, "content"):
-                for block in msg.content:
-                    if hasattr(block, "text"):
-                        response_text += block.text
-                    elif hasattr(block, "name"):
-                        # Tool use block
-                        tool_calls.append(
-                            {
-                                "name": block.name,
-                                "input": block.input if hasattr(block, "input") else {},
-                            }
-                        )
-                        # Track decisions made
-                        if block.name == "mcp__graph__record_decision":
-                            # Will be populated when we get the result
-                            pass
+        # In non-streaming mode with automatic_function_calling,
+        # Gemini might do multiple rounds. The final response is what we want.
+        # However, to match the frontend expectation of tool_calls, we might need
+        # to inspect the execution history if available, but for simplicity:
+
+        if response.text:
+            response_text = response.text
+
+        # Extract tool calls from the candidate parts
+        for part in response.candidates[0].content.parts:
+            if part.function_call:
+                tool_calls.append({
+                    "name": part.function_call.name,
+                    "input": part.function_call.args
+                })
 
         return {
             "response": response_text,
             "tool_calls": tool_calls,
-            "decisions_made": decisions_made,
+            "decisions_made": [], # Legacy, can be inferred from tool_calls
         }
 
     async def query_stream(
         self, message: str, conversation_history: list[dict[str, str]] | None = None
     ):
         """Send a query to the agent and stream the response."""
-        if not self.client:
-            raise RuntimeError("Agent not connected. Use 'async with' context manager.")
+        yield {"type": "agent_context", "context": {
+            "system_prompt": self.system_instruction,
+            "model": self.model_name,
+            "available_tools": [tool.__name__ for tool in self.tools],
+            "mcp_server": "gemini-native",
+        }}
 
-        # Build message with conversation context
-        if conversation_history and len(conversation_history) > 0:
-            history_text = "\n".join(
-                [f"{msg['role'].upper()}: {msg['content']}" for msg in conversation_history[-6:]]
+        history = self._get_genai_history(conversation_history or [])
+
+        # For streaming with tool calls, we handle it manually to yield partial events
+        # or use the internal chat session if it supports it.
+        # Actually, google-genai supports automatic function calling in streams too.
+
+        # We need to use a chat session to maintain state if we want multi-turn tool calling in one go
+        chat = self.client.chats.create(
+            model=self.model_name,
+            history=history,
+            config=types.GenerateContentConfig(
+                system_instruction=self.system_instruction,
+                tools=self.tools,
             )
-            full_message = f"""Previous conversation:
-{history_text}
+        )
 
-Current message from USER: {message}
+        # We'll manually handle the loop to yield "tool_use" and "tool_result" events
+        current_message = message
+        all_tool_calls = []
 
-Please respond to the current message, taking the conversation history into account."""
-        else:
-            full_message = message
+        while True:
+            # Send message and get stream
+            stream = chat.send_message_stream(current_message)
 
-        # Emit agent context first
-        yield {"type": "agent_context", "context": get_agent_context()}
+            tool_calls_in_this_turn = []
 
-        # Send the message
-        await self.client.query(full_message)
+            for chunk in stream:
+                if chunk.text:
+                    yield {"type": "text", "content": chunk.text}
 
-        tool_calls = []
-        tool_id_to_name = {}  # Map tool_use_id to tool name
-        decisions_made = []
-
-        async for msg in self.client.receive_response():
-            msg_type = type(msg).__name__
-
-            # Handle UserMessage containing ToolResultBlock objects
-            if msg_type == "UserMessage" and hasattr(msg, "content"):
-                for block in msg.content:
-                    block_type = type(block).__name__
-                    # ToolResultBlock has tool_use_id and content attributes
-                    if block_type == "ToolResultBlock":
-                        tool_use_id = getattr(block, "tool_use_id", None)
-                        block_content = getattr(block, "content", None)
-
-                        print(f"[DEBUG] ToolResultBlock - tool_use_id: {tool_use_id}")
-
-                        if tool_use_id:
-                            parsed_output = None
-
-                            # Parse the block content (list of content items)
-                            if isinstance(block_content, list):
-                                for item in block_content:
-                                    if isinstance(item, dict) and item.get("type") == "text":
-                                        try:
-                                            parsed_output = json.loads(item.get("text", "{}"))
-                                        except json.JSONDecodeError:
-                                            parsed_output = item.get("text")
-                                        break
-                                    elif hasattr(item, "text"):
-                                        try:
-                                            parsed_output = json.loads(item.text)
-                                        except json.JSONDecodeError:
-                                            parsed_output = item.text
-                                        break
-                            elif isinstance(block_content, str):
-                                try:
-                                    parsed_output = json.loads(block_content)
-                                except json.JSONDecodeError:
-                                    parsed_output = block_content
-
-                            # Look up the tool name from the tool_use_id
-                            tool_name = tool_id_to_name.get(tool_use_id, "unknown")
-                            print(
-                                f"[DEBUG] Yielding tool_result: name={tool_name}, output_type={type(parsed_output)}"
-                            )
-
-                            yield {
-                                "type": "tool_result",
-                                "name": tool_name,
-                                "output": parsed_output,
-                            }
-                continue
-
-            # Handle AssistantMessage content blocks
-            if hasattr(msg, "content"):
-                for block in msg.content:
-                    if hasattr(block, "text"):
-                        # Stream text content
-                        yield {"type": "text", "content": block.text}
-                    elif hasattr(block, "name"):
-                        # Tool use block
-                        tool_id = getattr(block, "id", None)
-                        tool_call = {
-                            "name": block.name,
-                            "input": block.input if hasattr(block, "input") else {},
+                # Check for tool calls in this chunk
+                for part in chunk.candidates[0].content.parts:
+                    if part.function_call:
+                        tc = {
+                            "name": part.function_call.name,
+                            "input": part.function_call.args
                         }
-                        tool_calls.append(tool_call)
+                        tool_calls_in_this_turn.append(tc)
+                        all_tool_calls.append(tc)
+                        yield {"type": "tool_use", **tc}
 
-                        # Track tool_use_id to name mapping
-                        if tool_id:
-                            tool_id_to_name[tool_id] = block.name
+            if not tool_calls_in_this_turn:
+                break
 
-                        yield {"type": "tool_use", **tool_call}
+            # Execute tools and feed back to Gemini
+            tool_responses = []
+            for tc in tool_calls_in_this_turn:
+                tool_func = next((t for t in self.tools if t.__name__ == tc["name"]), None)
+                if tool_func:
+                    try:
+                        # Handle both sync and async tools if necessary,
+                        # but our tools are defined as sync for Gemini compatibility in this context
+                        # because google-genai expects sync functions for automatic calling usually,
+                        # or we handle them here.
+                        # All our defined tools above are now sync.
+                        result = tool_func(**tc["input"])
+                        yield {"type": "tool_result", "name": tc["name"], "output": result}
+                        tool_responses.append(types.Part(
+                            function_response=types.FunctionResponse(
+                                name=tc["name"],
+                                response=result
+                            )
+                        ))
+                    except Exception as e:
+                        error_msg = {"error": str(e)}
+                        yield {"type": "tool_result", "name": tc["name"], "output": error_msg}
+                        tool_responses.append(types.Part(
+                            function_response=types.FunctionResponse(
+                                name=tc["name"],
+                                response=error_msg
+                            )
+                        ))
+                else:
+                    error_msg = {"error": f"Tool {tc['name']} not found"}
+                    yield {"type": "tool_result", "name": tc["name"], "output": error_msg}
+                    tool_responses.append(types.Part(
+                        function_response=types.FunctionResponse(
+                            name=tc["name"],
+                            response=error_msg
+                        )
+                    ))
 
-                        # Track decisions made
-                        if block.name == "mcp__graph__record_decision":
-                            pass
+            # Send tool responses back to Gemini
+            current_message = types.Content(role="user", parts=tool_responses)
 
-        # Final event with summary
         yield {
             "type": "done",
-            "tool_calls": tool_calls,
-            "decisions_made": decisions_made,
+            "tool_calls": all_tool_calls,
+            "decisions_made": [],
         }

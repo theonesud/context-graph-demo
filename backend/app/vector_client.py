@@ -1,18 +1,19 @@
 """
-Neo4j vector search client.
-Handles semantic similarity using text embeddings and hybrid search.
+Neo4j vector search client using local Ollama.
+Handles semantic similarity using nomic-embed-text via Ollama.
 """
 
 from typing import Optional
-
+import logging
 from neo4j import GraphDatabase
-from openai import OpenAI
+import ollama
 
 from .config import config
 
+logger = logging.getLogger(__name__)
 
 class VectorClient:
-    """Neo4j vector search client for semantic similarity."""
+    """Neo4j vector search client for semantic similarity using Ollama."""
 
     def __init__(self):
         self.driver = GraphDatabase.driver(
@@ -20,11 +21,9 @@ class VectorClient:
             auth=(config.neo4j.username, config.neo4j.password),
         )
         self.database = config.neo4j.database
-        self.openai_client = (
-            OpenAI(api_key=config.openai.api_key) if config.openai.api_key else None
-        )
-        self.embedding_model = config.openai.embedding_model
-        self.embedding_dimensions = config.openai.embedding_dimensions
+        self.ollama_client = ollama.Client(host=config.ollama.base_url)
+        self.model = config.ollama.model
+        self.dimensions = config.ollama.dimensions
 
     def close(self):
         self.driver.close()
@@ -34,26 +33,42 @@ class VectorClient:
     # ============================================
 
     def generate_embedding(self, text: str) -> list[float]:
-        """Generate an embedding for the given text using OpenAI."""
-        if not self.openai_client:
-            raise ValueError("OpenAI API key not configured")
-
-        response = self.openai_client.embeddings.create(
-            model=self.embedding_model,
-            input=text,
-        )
-        return response.data[0].embedding
+        """Generate an embedding for the given text using Ollama."""
+        try:
+            response = self.ollama_client.embed(
+                model=self.model,
+                input=text,
+            )
+            # The ollama-python library return format:
+            # response.embeddings is a list of embeddings if input was a list or string?
+            # Actually response['embeddings'][0] typically if it's the dict response
+            # Let's check the library signature. Usually it's response.embeddings[0]
+            if hasattr(response, 'embeddings') and response.embeddings:
+                return response.embeddings[0]
+            elif isinstance(response, dict) and 'embeddings' in response:
+                return response['embeddings'][0]
+            else:
+                raise ValueError(f"Unexpected response format from Ollama: {response}")
+        except Exception as e:
+            logger.error(f"Error generating embedding with Ollama: {e}")
+            raise
 
     def generate_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for multiple texts."""
-        if not self.openai_client:
-            raise ValueError("OpenAI API key not configured")
-
-        response = self.openai_client.embeddings.create(
-            model=self.embedding_model,
-            input=texts,
-        )
-        return [item.embedding for item in response.data]
+        try:
+            response = self.ollama_client.embed(
+                model=self.model,
+                input=texts,
+            )
+            if hasattr(response, 'embeddings'):
+                return response.embeddings
+            elif isinstance(response, dict) and 'embeddings' in response:
+                return response['embeddings']
+            else:
+                raise ValueError(f"Unexpected response format from Ollama: {response}")
+        except Exception as e:
+            logger.error(f"Error generating batch embeddings with Ollama: {e}")
+            raise
 
     # ============================================
     # SEMANTIC SEARCH
@@ -139,9 +154,6 @@ class VectorClient:
     ) -> list[dict]:
         """
         Find precedent decisions using semantic similarity.
-
-        Uses text embeddings (reasoning_embedding) to find decisions with
-        similar reasoning to the given scenario.
         """
         query_embedding = self.generate_embedding(scenario)
 
@@ -182,16 +194,14 @@ class VectorClient:
         structural_weight: float = 0.5,
         limit: int = 5,
     ) -> list[dict]:
-        """
-        Find decisions similar to a given decision using hybrid similarity.
-        """
+        """ Find decisions similar to a given decision using hybrid similarity. """
         with self.driver.session(database=self.database) as session:
             result = session.run(
                 """
-                // Get the source decision
                 MATCH (source:Decision {id: $decision_id})
+                WHERE source.reasoning_embedding IS NOT NULL
+                  AND source.fastrp_embedding IS NOT NULL
 
-                // Find semantically similar
                 CALL db.index.vector.queryNodes(
                     'decision_reasoning_idx',
                     $limit * 2,
@@ -199,8 +209,6 @@ class VectorClient:
                 ) YIELD node AS semantic_match, score AS semantic_score
                 WHERE semantic_match <> source
 
-                // Find structurally similar
-                WITH source, semantic_match, semantic_score
                 CALL db.index.vector.queryNodes(
                     'decision_fastrp_idx',
                     $limit * 2,
@@ -208,17 +216,6 @@ class VectorClient:
                 ) YIELD node AS structural_match, score AS structural_score
                 WHERE structural_match <> source
 
-                // Find overlap and combine
-                WITH source,
-                     CASE WHEN semantic_match = structural_match
-                          THEN semantic_match
-                          ELSE null END AS both_match,
-                     semantic_match,
-                     semantic_score,
-                     structural_match,
-                     structural_score
-
-                // Collect all matches with their scores
                 WITH collect({
                     decision: semantic_match,
                     semantic: semantic_score,
@@ -283,32 +280,12 @@ class VectorClient:
             )
             return result.single() is not None
 
-    def update_policy_description_embedding(
-        self,
-        policy_id: str,
-        description: str,
-    ) -> bool:
-        """Generate and store description embedding for a policy."""
-        embedding = self.generate_embedding(description)
-
-        with self.driver.session(database=self.database) as session:
-            result = session.run(
-                """
-                MATCH (p:Policy {id: $policy_id})
-                SET p.description_embedding = $embedding
-                RETURN p.id AS id
-                """,
-                {"policy_id": policy_id, "embedding": embedding},
-            )
-            return result.single() is not None
-
     def batch_update_decision_embeddings(
         self,
         limit: int = 100,
     ) -> int:
         """Generate embeddings for decisions that don't have them."""
         with self.driver.session(database=self.database) as session:
-            # Get decisions without embeddings
             result = session.run(
                 """
                 MATCH (d:Decision)
@@ -323,11 +300,9 @@ class VectorClient:
             if not decisions:
                 return 0
 
-            # Generate embeddings in batch
             texts = [d["reasoning"] for d in decisions]
             embeddings = self.generate_embeddings_batch(texts)
 
-            # Update each decision
             for decision, embedding in zip(decisions, embeddings):
                 session.run(
                     """
@@ -339,6 +314,5 @@ class VectorClient:
 
             return len(decisions)
 
-
-# Singleton instance
+# Singleton
 vector_client = VectorClient()

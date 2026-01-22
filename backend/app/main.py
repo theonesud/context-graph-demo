@@ -179,6 +179,8 @@ async def chat_stream(request: ChatRequest):
     Send a message to the Claude agent with streaming response.
     Returns Server-Sent Events (SSE) for real-time streaming.
     """
+    import asyncio
+
     session_id = request.session_id or str(uuid.uuid4())
     logger.info(f"Stream chat request received: {request.message[:100]}...")
 
@@ -192,54 +194,104 @@ async def chat_stream(request: ChatRequest):
             logger.info("Creating ContextGraphAgent for streaming...")
             async with ContextGraphAgent() as agent:
                 logger.info("Agent connected, starting stream...")
-                async for event in agent.query_stream(
-                    request.message, conversation_history=history
-                ):
-                    # Send different event types
-                    if event["type"] == "agent_context":
-                        yield {
-                            "event": "agent_context",
-                            "data": json.dumps(event["context"]),
-                        }
-                    elif event["type"] == "text":
-                        yield {
-                            "event": "text",
-                            "data": json.dumps({"content": event["content"]}),
-                        }
-                    elif event["type"] == "tool_use":
-                        logger.info(f"Tool use: {event['name']}")
-                        yield {
-                            "event": "tool_use",
-                            "data": json.dumps(
-                                {
-                                    "name": event["name"],
-                                    "input": event.get("input", {}),
+
+                # Use an async queue to enable keep-alive pings during long operations
+                event_queue: asyncio.Queue = asyncio.Queue()
+                stream_done = asyncio.Event()
+
+                async def process_agent_stream():
+                    """Process agent events and put them in the queue."""
+                    try:
+                        async for event in agent.query_stream(
+                            request.message, conversation_history=history
+                        ):
+                            await event_queue.put(event)
+                        await event_queue.put(None)  # Signal completion
+                    except Exception as e:
+                        await event_queue.put({"type": "error", "error": str(e)})
+                        await event_queue.put(None)
+                    finally:
+                        stream_done.set()
+
+                # Start processing in background
+                agent_task = asyncio.create_task(process_agent_stream())
+
+                try:
+                    while True:
+                        try:
+                            # Wait for event with timeout for keep-alive
+                            event = await asyncio.wait_for(event_queue.get(), timeout=15.0)
+
+                            if event is None:
+                                # Stream completed
+                                break
+
+                            # Send different event types
+                            if event["type"] == "agent_context":
+                                yield {
+                                    "event": "agent_context",
+                                    "data": json.dumps(event["context"]),
                                 }
-                            ),
-                        }
-                    elif event["type"] == "tool_result":
-                        logger.info(f"Tool result: {event['name']}")
-                        yield {
-                            "event": "tool_result",
-                            "data": json.dumps(
-                                {
-                                    "name": event["name"],
-                                    "output": event.get("output"),
+                            elif event["type"] == "text":
+                                yield {
+                                    "event": "text",
+                                    "data": json.dumps({"content": event["content"]}),
                                 }
-                            ),
-                        }
-                    elif event["type"] == "done":
-                        logger.info("Stream completed successfully")
-                        yield {
-                            "event": "done",
-                            "data": json.dumps(
-                                {
-                                    "session_id": session_id,
-                                    "tool_calls": event.get("tool_calls", []),
-                                    "decisions_made": event.get("decisions_made", []),
+                            elif event["type"] == "tool_use":
+                                logger.info(f"Tool use: {event['name']}")
+                                yield {
+                                    "event": "tool_use",
+                                    "data": json.dumps(
+                                        {
+                                            "name": event["name"],
+                                            "input": event.get("input", {}),
+                                        }
+                                    ),
                                 }
-                            ),
-                        }
+                            elif event["type"] == "tool_result":
+                                logger.info(f"Tool result: {event['name']}")
+                                yield {
+                                    "event": "tool_result",
+                                    "data": json.dumps(
+                                        {
+                                            "name": event["name"],
+                                            "output": event.get("output"),
+                                        }
+                                    ),
+                                }
+                            elif event["type"] == "done":
+                                logger.info("Stream completed successfully")
+                                yield {
+                                    "event": "done",
+                                    "data": json.dumps(
+                                        {
+                                            "session_id": session_id,
+                                            "tool_calls": event.get("tool_calls", []),
+                                            "decisions_made": event.get("decisions_made", []),
+                                        }
+                                    ),
+                                }
+                            elif event["type"] == "error":
+                                logger.error(f"Agent error: {event.get('error')}")
+                                yield {
+                                    "event": "error",
+                                    "data": json.dumps({"error": event.get("error")}),
+                                }
+
+                        except asyncio.TimeoutError:
+                            # Send keep-alive ping to prevent connection timeout
+                            yield {
+                                "event": "ping",
+                                "data": json.dumps({"keepalive": True}),
+                            }
+                finally:
+                    # Ensure the agent task is cleaned up
+                    if not agent_task.done():
+                        agent_task.cancel()
+                        try:
+                            await agent_task
+                        except asyncio.CancelledError:
+                            pass
 
         except Exception as e:
             logger.error(f"Stream error: {traceback.format_exc()}")
@@ -248,7 +300,7 @@ async def chat_stream(request: ChatRequest):
                 "data": json.dumps({"error": str(e)}),
             }
 
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(event_generator(), ping=20)
 
 
 # ============================================

@@ -206,7 +206,13 @@ export async function* streamChatMessage(
             const parsed = JSON.parse(data);
             console.log("SSE parsed data:", parsed);
             // Determine event type from data content
-            if ("system_prompt" in parsed && "available_tools" in parsed) {
+            if ("keepalive" in parsed) {
+              // Keep-alive ping - ignore silently
+              continue;
+            } else if (
+              "system_prompt" in parsed &&
+              "available_tools" in parsed
+            ) {
               // Agent context event
               yield { type: "agent_context", context: parsed };
             } else if ("content" in parsed && !("type" in parsed)) {

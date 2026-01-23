@@ -173,7 +173,7 @@ export function ChatInterface({
             break;
 
           case "text":
-            fullContent += event.content + "\n\n";
+            fullContent += event.content;
             setMessages((prev) => {
               const updated = [...prev];
               updated[assistantMessageIndex] = {

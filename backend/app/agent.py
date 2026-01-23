@@ -560,6 +560,7 @@ class ContextGraphAgent:
             config=types.GenerateContentConfig(
                 system_instruction=self.system_instruction,
                 tools=self.tools,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
             )
         )
 
@@ -574,11 +575,10 @@ class ContextGraphAgent:
             tool_calls_in_this_turn = []
 
             for chunk in stream:
-                if chunk.text:
-                    yield {"type": "text", "content": chunk.text}
-
-                # Check for tool calls in this chunk
                 for part in chunk.candidates[0].content.parts:
+                    if part.text:
+                        yield {"type": "text", "content": part.text}
+
                     if part.function_call:
                         tc = {
                             "name": part.function_call.name,
@@ -630,7 +630,7 @@ class ContextGraphAgent:
                     ))
 
             # Send tool responses back to Gemini
-            current_message = types.Content(role="user", parts=tool_responses)
+            current_message = tool_responses
 
         yield {
             "type": "done",

@@ -9,6 +9,7 @@ from neo4j import GraphDatabase
 import ollama
 
 from .config import config
+from .context_graph_client import convert_neo4j_value
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,7 @@ class VectorClient:
                     "category": category,
                 },
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     def search_policies_semantic(
         self,
@@ -138,7 +139,7 @@ class VectorClient:
                 """,
                 {"query_embedding": query_embedding, "limit": limit},
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     # ============================================
     # HYBRID SEARCH (Semantic + Structural)
@@ -185,7 +186,7 @@ class VectorClient:
                     "limit": limit,
                 },
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     def find_similar_decisions_hybrid(
         self,
@@ -255,7 +256,7 @@ class VectorClient:
                     "limit": limit,
                 },
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     # ============================================
     # EMBEDDING STORAGE

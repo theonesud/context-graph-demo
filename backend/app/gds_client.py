@@ -8,6 +8,7 @@ from typing import Optional
 from neo4j import GraphDatabase
 
 from .config import config
+from .context_graph_client import convert_neo4j_value
 
 
 class GDSClient:
@@ -127,7 +128,7 @@ class GDSClient:
                 RETURN graphName, nodeCount, relationshipCount, creationTime
                 """
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     # ============================================
     # FASTRP EMBEDDINGS
@@ -228,7 +229,7 @@ class GDSClient:
                     "limit": limit,
                 },
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     def run_knn_all(
         self,
@@ -302,7 +303,7 @@ class GDSClient:
                     "cutoff": similarity_cutoff,
                 },
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     def find_potential_duplicates(
         self,
@@ -336,7 +337,7 @@ class GDSClient:
                 """,
                 {"graph_name": graph_name, "cutoff": similarity_cutoff},
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     # ============================================
     # GRAPH PROJECTION HELPERS
@@ -480,7 +481,7 @@ class GDSClient:
                     """,
                     {"graph_name": graph_name, "threshold": similarity_threshold},
                 )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     # ============================================
     # LOUVAIN COMMUNITY DETECTION
@@ -514,7 +515,7 @@ class GDSClient:
                 """,
                 {"graph_name": graph_name},
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     def write_community_ids(
         self,
@@ -638,7 +639,7 @@ class GDSClient:
                 """,
                 {"graph_name": graph_name},
             )
-            return [dict(record) for record in result]
+            return [convert_neo4j_value(dict(record)) for record in result]
 
     def write_influence_scores(
         self,

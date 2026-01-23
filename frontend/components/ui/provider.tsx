@@ -7,7 +7,7 @@ import { system } from '@/lib/system';
 export function Provider({ children }: { children: React.ReactNode }) {
   return (
     <ChakraProvider value={system}>
-      <ThemeProvider attribute="class" disableTransitionOnChange>
+      <ThemeProvider attribute="class" forcedTheme="light" enableSystem={false} disableTransitionOnChange>
         {children}
       </ThemeProvider>
     </ChakraProvider>
